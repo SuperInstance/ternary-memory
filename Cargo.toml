@@ -1,0 +1,11 @@
+[package]
+name = "ternary-memory"
+version = "0.1.0"
+edition = "2021"
+description = "Memory systems for ternary agents — short-term, long-term, and episodic memory"
+license = "MIT"
+repository = "https://github.com/SuperInstance/ternary-memory"
+keywords = ["ternary", "agent", "memory", "ai"]
+categories = ["algorithms", "data-structures"]
+
+[dev-dependencies]
