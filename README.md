@@ -95,6 +95,14 @@ if let Some(best) = ltm.best_label() {
 - **Configurable**: Forgetting curves, capacities, and thresholds are all tunable
 - **Efficient**: O(1) short-term store, O(n) consolidation, Welford's online stats
 
+## See Also
+
+- **ternary-agent** — Core agent types with ternary state
+- **ternary-archive** — Archival and retrieval of ternary agent histories
+- **ternary-database** — Persistent storage for ternary data
+- **ternary-replay** — Replay and analysis of past agent decisions
+- **ternary-chronicle** — Chronological event logging for ternary systems
+
 ## License
 
 MIT
