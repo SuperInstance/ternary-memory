@@ -14,6 +14,8 @@ Agents without memory repeat the same mistakes. Agents with only recent memory c
 
 The forgetting curve is configurable: Ebbinghaus exponential, power-law, or linear decay — modeling different memory retention profiles observed in cognitive psychology.
 
+**When to use this crate.** Use `ternary-memory` when you're building an agent (game NPC, robot, LLM-driven assistant, RL policy) that needs to *learn from experience* — i.e. recall recent context, accumulate statistics about what works, and remember noteworthy events. Don't use it for raw time-series storage or as a persistent database: everything lives in process memory and is lost when the process exits.
+
 ## How It Works
 
 ### Short-Term Memory: Ring Buffer with Decay
@@ -24,7 +26,7 @@ STM is a fixed-capacity ring buffer. When full, the oldest entry is overwritten.
 R(t) = e^(−t / S)
 ```
 
-where t = elapsed time since storage, S = stability parameter (half-life analog). At t = S · ln(2) ≈ 0.693·S, retention drops to 50%.
+where t = elapsed time since storage, S = stability parameter (half-life analog). At t = S · ln(2) ≈ 0.693·S, retention drops to 50%. The default curve (`ForgettingCurve::default()`) is constructed via `ebbinghaus_with_half_life(100.0)`, so the default half-life is 100 ticks.
 
 **Three forgetting models**:
 
@@ -57,31 +59,39 @@ This avoids the catastrophic cancellation that affects the naive two-pass formul
 C(n) = 1 − 1/(1 + √n)
 ```
 
-At n = 1, C = 0.29; n = 10, C = 0.76; n = 100, C = 0.91; n → ∞, C → 1.
+| n    | C(n)    |
+|------|---------|
+| 0    | 0.0     |
+| 1    | 0.5     |
+| 10   | ≈ 0.76  |
+| 100  | ≈ 0.91  |
+| → ∞  | → 1     |
 
 ### Episodic Memory: Salience-Filtered Events
 
-Episodic memory stores only **noteworthy** events, filtered by configurable thresholds:
+Episodic memory stores only **noteworthy** events. The built-in consolidation pass detects two episode kinds automatically:
 
-- **Breakthrough**: outcome ≥ breakthrough_threshold (default: 0.8)
-- **Near-miss**: outcome ≤ near_miss_threshold (default: −0.5)
-- **Surprise**: unexpected outcome (user-defined criterion)
+- **Breakthrough**: outcome ≥ `breakthrough_threshold` (default: 0.8)
+- **Near-miss**: outcome ≤ `near_miss_threshold` (default: −0.5)
 
-When capacity is reached, the oldest episode is evicted (FIFO). This bounded design ensures episodic memory never causes unbounded memory growth.
+A third kind, **Surprise** (`EpisodeKind::Surprise`), is user-defined — `MemoryConsolidation` does not auto-detect it; construct and store those episodes yourself via `Episode::new(..., EpisodeKind::Surprise, ...)`.
+
+When capacity is reached, the oldest episode is evicted (FIFO). This bounded design ensures episodic memory never causes unbounded memory growth. (`EpisodicMemory::new(0)` is also legal and stores nothing.)
 
 ### Memory Index: Tag-Based Retrieval
 
-All memory entries can be tagged with context keys for fast retrieval:
+Any memory entry can be tagged with context keys for fast retrieval via the generic `MemoryIndex<T>`:
 
 ```
 ContextTag = { key: String, value: String }
 ```
 
 Two query modes:
-- **query_all(tags)**: AND semantics — match all specified tags
-- **query_any(tags)**: OR semantics — match any specified tag
 
-Results are sorted by relevance (descending), enabling priority-weighted retrieval.
+- `query_all(tags)`: AND semantics — match all specified tags
+- `query_any(tags)`: OR semantics — match any specified tag
+
+Results are sorted by relevance (descending), enabling priority-weighted retrieval. Entries whose `relevance` is `NaN` are skipped.
 
 ### Memory Consolidation
 
@@ -92,68 +102,93 @@ For each decision in STM.drain():
     LTM.observe(decision.action, decision.outcome)
     If decision.outcome ≥ breakthrough_threshold:
         Episodic.store(Breakthrough episode)
-    If decision.outcome ≤ near_miss_threshold:
+    Else if decision.outcome ≤ near_miss_threshold:
         Episodic.store(NearMiss episode)
 ```
 
-This implements the **sleep consolidation** hypothesis (Diekelmann & Born, 2010): short-term memories are transferred to long-term storage during quiescent periods.
+Breakthrough and near-miss are mutually exclusive: a single decision produces at most one episode. This implements the **sleep consolidation** hypothesis (Diekelmann & Born, 2010): short-term memories are transferred to long-term storage during quiescent periods. Use `consolidate_selective(...)` when you want to keep some decisions in STM (e.g. only consolidate decisions the agent has finished reasoning about).
 
 ### Complexity
 
 | Operation | Time | Space |
 |-----------|------|-------|
-| STM::store(d) | O(1) | O(1) |
-| STM::recent(n) | O(n) | O(n) |
-| STM::drain() | O(capacity) | O(capacity) |
-| LTM::observe(label, x) | O(1) | O(1) |
-| LTM::summary(label) | O(k) | O(1) |
-| Episodic::store(e) | O(1) | O(1) |
-| Episodic::query(criterion) | O(n) | O(k) |
-| Index::query_all(tags) | O(N · T) | O(k) |
-| ForgettingCurve::retention(t) | O(1) | O(1) |
-| consolidate() | O(|STM|) | O(1) |
+| `ShortTermMemory::store(d)` | O(1) | O(1) |
+| `ShortTermMemory::recall()` | O(capacity) | O(capacity) |
+| `ShortTermMemory::drain()` | O(capacity) | O(capacity) |
+| `LongTermMemory::observe(label, x)` | O(k) | O(1) |
+| `LongTermMemory::get(label)` | O(k) | O(1) |
+| `EpisodicMemory::store(e)` | O(1) amortised | O(1) |
+| `EpisodicMemory::recall_top(n)` | O(m log m) | O(m) |
+| `MemoryIndex::query_all(tags)` | O(N · T) | O(k) |
+| `ForgettingCurve::retention(t)` | O(1) | O(1) |
+| `MemoryConsolidation::consolidate()` | O(\|STM\|) | O(1) |
 
-Where N = indexed entries, T = query tags, k = results, |STM| = entries in STM.
+Where N = indexed entries, T = query tags, k = results, m = episodes stored, \|STM\| = entries drained from STM.
 
 ## Quick Start
 
+This exact program is `examples/quickstart.rs` in the repo and is run as part of CI:
+
 ```rust
 use ternary_memory::{
-    ShortTermMemory, LongTermMemory, EpisodicMemory,
-    MemoryConsolidation, ForgettingCurve, ForgettingModel,
-    Decision, Episode, EpisodeKind
+    Decision, Episode, EpisodeKind, EpisodicMemory, LongTermMemory,
+    MemoryConsolidation, ShortTermMemory,
 };
 
-// Short-term memory: 100 slots with Ebbinghaus decay
+// Short-term memory: 100 slots with default Ebbinghaus decay.
 let mut stm = ShortTermMemory::with_capacity(100);
 
-// Store decisions
+// Store decisions.
 stm.store(Decision::new("explore_north", 0.7, 1).with_tag("frontier"));
 stm.store(Decision::new("attack_early", -0.3, 2).with_tag("combat"));
 stm.store(Decision::new("trade_silk", 0.9, 3).with_tag("economy"));
 
-// Long-term memory: accumulated statistics
+// Long-term memory: per-label running statistics.
 let mut ltm = LongTermMemory::new();
 ltm.observe("explore_north", 0.7);
 ltm.observe("explore_north", 0.5);
 ltm.observe("explore_north", 0.8);
-// Later: retrieve statistics
-if let Some(summary) = ltm.summary("explore_north") {
-    println!("Mean: {:.2}, Std: {:.2}, n={}",
-        summary.mean_outcome, summary.std_dev(), summary.count);
+// Later: retrieve statistics.
+if let Some(summary) = ltm.get("explore_north") {
+    println!(
+        "Mean: {:.2}, Std: {:.2}, n={}",
+        summary.mean_outcome,
+        summary.std_dev(),
+        summary.count
+    );
 }
 
-// Episodic memory: important events
+// Episodic memory: important events.
 let mut episodic = EpisodicMemory::new(1000);
 episodic.store(Episode::new(
-    "Found gold mine!", EpisodeKind::Breakthrough, 5, 0.95
+    "Found gold mine!",
+    EpisodeKind::Breakthrough,
+    5,
+    0.95,
 ));
 
-// Consolidate STM → LTM + Episodic
-let mut consolidation = MemoryConsolidation::new();
+// Consolidate STM → LTM + Episodic.
+let consolidation = MemoryConsolidation::new();
 let result = consolidation.consolidate(&mut stm, &mut ltm, &mut episodic);
-println!("Consolidated {} entries, found {} episodes",
-    result.consolidated_count, result.new_episodes);
+println!(
+    "Consolidated {} entries, found {} episodes",
+    result.consolidated_count, result.new_episodes
+);
+```
+
+Expected output (the LTM block computes `mean(0.7, 0.5, 0.8) ≈ 0.67`, `σ ≈ 0.12`):
+
+```
+Mean: 0.67, Std: 0.12, n=3
+Consolidated 3 entries, found 1 episodes
+```
+
+(`trade_silk` at outcome 0.9 is the single breakthrough; `attack_early` at −0.3 is between the two thresholds so no episode is created; `explore_north` was already moved into LTM above so it's just an observation.)
+
+Run it yourself:
+
+```sh
+cargo run --example quickstart
 ```
 
 ## API
@@ -179,6 +214,8 @@ pub enum ForgettingModel {
 }
 ```
 
+Full per-item documentation is available via `cargo doc --open`.
+
 ## Architecture Notes
 
 This crate implements the **η (eta) layer** cognitive substrate in the γ + η = C framework:
@@ -188,6 +225,15 @@ This crate implements the **η (eta) layer** cognitive substrate in the γ + η 
 - **C**: The complete agent cognitive system. γ decides when to consolidate and share; η does the actual storage and retrieval.
 
 The ternary connection: agent decisions are evaluated as ternary outcomes (bad/neutral/good = {-1, 0, +1}), and the Ebbinghaus decay naturally weights recent ternary decisions more heavily in STM.
+
+## Numerical-Stability & Edge-Case Guarantees
+
+A few guarantees the crate is explicitly tested for:
+
+- **Welford variance** matches a two-pass reference within `1e-3` even on adversarial inputs (large nearly-equal values that defeat the naive `Σx² − (Σx)²/n` formula).
+- **NaN-safe ranking.** `LongTermMemory::best_label`, `EpisodicMemory::recall_top`, and `MemoryIndex::query_{all,any}` skip NaN entries instead of silently letting them win the comparison. (`partial_cmp().unwrap_or(Equal)` is never used; comparisons go through `f64::total_cmp`.)
+- **Capacity zero is legal.** `ShortTermMemory::new(0, _)` and `EpisodicMemory::new(0)` are no-ops rather than panicking.
+- **Complete forgetting is well-defined.** A `Linear` curve at `t ≥ horizon` returns retention exactly `0.0`; `weighted_average_outcome` then returns `0.0` rather than dividing by zero total weight.
 
 ## References
 
